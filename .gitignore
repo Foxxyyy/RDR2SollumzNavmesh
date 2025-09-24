@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints
+
+# Blender
+*.blend1
+*.blend2
+*.blend@
+*.blend[0-9]    # numbered backups
+*.blend.old
+*.blend.swp
+
+# Blender autosave / crash logs
+*.autosave
+*.crash.txt
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
