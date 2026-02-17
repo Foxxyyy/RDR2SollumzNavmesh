@@ -3,10 +3,12 @@ from .element import (
     ListProperty,
     TextProperty,
     ValueProperty,
-    VectorProperty
+    VectorProperty,
+    _format_float32,
 )
 from xml.etree import ElementTree as ET
 from mathutils import Vector
+from numpy import float32
 
 
 class YNV:
@@ -62,6 +64,15 @@ class NavLinkList(ListProperty):
     list_type = NavLink
     tag_name = "SpecialLinks"
 
+    def _do_to_xml(self):
+        element = ET.Element(self.tag_name)
+        if self.value:
+            for i, item in enumerate(self.value):
+                item_elem = item.to_xml()
+                item_elem.set("i", str(i))
+                element.append(item_elem)
+        return element
+
 
 class NavPolygonVertices(ListProperty):
     list_type = Vector
@@ -88,9 +99,9 @@ class NavPolygonVertices(ListProperty):
         if self.value:
             for v in self.value:
                 item = ET.Element("Item")
-                item.set("x", str(v.x))
-                item.set("y", str(v.y))
-                item.set("z", str(v.z))
+                item.set("x", _format_float32(v.x))
+                item.set("y", _format_float32(v.y))
+                item.set("z", _format_float32(v.z))
                 element.append(item)
         return element
 
@@ -135,23 +146,34 @@ class NavPolygonEdges(ListProperty):
     def to_xml(self):
         element = ET.Element(self.tag_name)
         if self.value:
-            lines = self.value.splitlines() if isinstance(self.value, str) else self.value
+            if isinstance(self.value, str):
+                lines = self.value.splitlines()
+            else:
+                lines = self.value
             for line in lines:
-                parts = [p.strip() for p in line.split(";")]
-                if len(parts) < 4:
-                    continue
-
-                a, b, c = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
-                p3 = parts[3] # CodeX exports the edge flag as a string or integer...
-                try:
-                    flag_val = int(p3)
-                except ValueError:
-                    flag_val = Navmesh.edge_flags.get(p3, 0)
-
-                flag_str = next((k for k, v in Navmesh.edge_flags.items() if v == flag_val), str(flag_val))
-
                 item = ET.Element("Item")
-                item.text = f"{a}; {b}; {c}; {flag_str}"
+                if isinstance(line, tuple):
+                    a, b, c = int(line[0]), int(line[1]), int(line[2])
+                    flag_val = line[3] if len(line) > 3 else 0
+                    if isinstance(flag_val, str):
+                        try:
+                            flag_val = int(flag_val)
+                        except ValueError:
+                            flag_val = Navmesh.edge_flags.get(flag_val, 0)
+                    flag_str = next((k for k, v in Navmesh.edge_flags.items() if v == flag_val), str(flag_val))
+                    item.text = f"{a}; {b}; {c}; {flag_str}"
+                elif isinstance(line, str):
+                    parts = [p.strip() for p in line.split(";")]
+                    if len(parts) < 4:
+                        continue
+                    a, b, c = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
+                    p3 = parts[3]
+                    try:
+                        flag_val = int(p3)
+                    except ValueError:
+                        flag_val = Navmesh.edge_flags.get(p3, 0)
+                    flag_str = next((k for k, v in Navmesh.edge_flags.items() if v == flag_val), str(flag_val))
+                    item.text = f"{a}; {b}; {c}; {flag_str}"
                 element.append(item)
         return element
 
@@ -166,17 +188,61 @@ class NavPolygon(ElementTree):
         self.water_depth = ValueProperty("WaterDepth")
         self.centroid_x = ValueProperty("CentroidX")
         self.centroid_y = ValueProperty("CentroidY")
+        self.unk30a = ValueProperty("Unk30a")
         self.vertices = NavPolygonVertices("Vertices")
         self.edges = NavPolygonEdges("Edges")
+        self.links = TextProperty("Links")
         self.is_terrain_poly = is_terrain_poly
 
     def to_xml(self):
-        return super().to_xml()
+        root = ET.Element(self.tag_name)
+        # Flags - always write if non-empty
+        flags_elem = self.get_element("flags").to_xml()
+        if flags_elem is not None:
+            root.append(flags_elem)
+        # Audio - only write if non-zero
+        if self.audio_data and self.audio_data != 0:
+            root.append(self.get_element("audio_data").to_xml())
+        # WaterDepth - only write if non-zero
+        if self.water_depth and self.water_depth != 0:
+            root.append(self.get_element("water_depth").to_xml())
+        # CentroidX - only write if non-zero
+        if self.centroid_x and self.centroid_x != 0:
+            root.append(self.get_element("centroid_x").to_xml())
+        # CentroidY - only write if non-zero
+        if self.centroid_y and self.centroid_y != 0:
+            root.append(self.get_element("centroid_y").to_xml())
+        # Unk30a - only write if non-zero
+        if self.unk30a and self.unk30a != 0:
+            root.append(self.get_element("unk30a").to_xml())
+        # Vertices
+        verts_elem = self.get_element("vertices").to_xml()
+        if verts_elem is not None:
+            root.append(verts_elem)
+        # Edges
+        edges_elem = self.get_element("edges").to_xml()
+        if edges_elem is not None:
+            root.append(edges_elem)
+        # Links (per-polygon special link indices)
+        if self.links and str(self.links).strip():
+            links_elem = self.get_element("links").to_xml()
+            if links_elem is not None:
+                root.append(links_elem)
+        return root
 
 
 class NavPolygonList(ListProperty):
     list_type = NavPolygon
     tag_name = "Polygons"
+
+    def _do_to_xml(self):
+        element = ET.Element(self.tag_name)
+        if self.value:
+            for i, item in enumerate(self.value):
+                item_elem = item.to_xml()
+                item_elem.set("i", str(i))
+                element.append(item_elem)
+        return element
 
 
 class Navmesh(ElementTree):
@@ -293,3 +359,23 @@ class Navmesh(ElementTree):
 
     def to_xml(self):
         return super().to_xml()
+
+    def write_xml(self, filepath):
+        """Write navmesh XML with 1-space indentation to match CodeX format."""
+        from .element import indent, remove_elements_with_no_attributes
+        element = self.to_xml()
+        indent(element, amount=" ")
+        elementTree = ET.ElementTree(element)
+        remove_elements_with_no_attributes(elementTree.getroot())
+        # Write to bytes, then fix XML declaration to use double quotes
+        import io
+        buf = io.BytesIO()
+        elementTree.write(buf, encoding="UTF-8", xml_declaration=True)
+        xml_bytes = buf.getvalue()
+        # Replace single-quoted XML declaration with double-quoted
+        xml_bytes = xml_bytes.replace(
+            b"<?xml version='1.0' encoding='UTF-8'?>",
+            b'<?xml version="1.0" encoding="UTF-8"?>',
+        )
+        with open(filepath, "wb") as f:
+            f.write(xml_bytes)

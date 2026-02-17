@@ -7,6 +7,14 @@ from xml.etree import ElementTree as ET
 from numpy import float32
 
 
+def _format_float32(val):
+    """Format a float32 value, stripping trailing '.0' for integer values."""
+    s = str(float32(val))
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s
+
+
 def remove_elements_with_no_attributes(elem):
     for child in list(elem):
         remove_elements_with_no_attributes(child)
@@ -16,9 +24,8 @@ def remove_elements_with_no_attributes(elem):
         elem.remove(child)
 
 
-def indent(elem: ET.Element, level=0):
+def indent(elem: ET.Element, level=0, amount="  "):
     """Custom indentation to get elements like <VerticesProperty /> to output nicely"""
-    amount = "  "
     i = "\n" + level * amount
     if len(elem):
         if not elem.text or not elem.text.strip():
@@ -26,7 +33,7 @@ def indent(elem: ET.Element, level=0):
         if not elem.tail or not elem.tail.strip():
             elem.tail = i
         for elem in elem:
-            indent(elem, level + 1)
+            indent(elem, level + 1, amount)
         if not elem.tail or not elem.tail.strip():
             elem.tail = i
     else:
@@ -347,8 +354,8 @@ class Vector2Property(ElementProperty):
         return Vector2Property(element.tag, Vector((float(element.get("x", default=0)), float(element.get("y", default=0)))))
 
     def to_xml(self):
-        x = str(float32(self.value.x))
-        y = str(float32(self.value.y))
+        x = _format_float32(self.value.x)
+        y = _format_float32(self.value.y)
         return ET.Element(self.tag_name, attrib={"x": x, "y": y})
 
 
@@ -363,9 +370,9 @@ class VectorProperty(ElementProperty):
         return VectorProperty(element.tag, Vector((float(element.get("x", default=0)), float(element.get("y", default=0)), float(element.get("z", default=0)))))
 
     def to_xml(self):
-        x = str(float32(self.value.x))
-        y = str(float32(self.value.y))
-        z = str(float32(self.value.z))
+        x = _format_float32(self.value.x)
+        y = _format_float32(self.value.y)
+        z = _format_float32(self.value.z)
         return ET.Element(self.tag_name, attrib={"x": x, "y": y, "z": z})
 
 
@@ -380,10 +387,10 @@ class Vector4Property(ElementProperty):
         return Vector4Property(element.tag, Vector((float(element.get("x", default=0)), float(element.get("y", default=0)), float(element.get("z", default=0)), float(element.get("w", default=0)))))
 
     def to_xml(self):
-        x = str(float32(self.value.x))
-        y = str(float32(self.value.y))
-        z = str(float32(self.value.z))
-        w = str(float32(self.value.w))
+        x = _format_float32(self.value.x)
+        y = _format_float32(self.value.y)
+        z = _format_float32(self.value.z)
+        w = _format_float32(self.value.w)
         return ET.Element(self.tag_name, attrib={"x": x, "y": y, "z": z, "w": w})
 
 
@@ -401,10 +408,10 @@ class QuaternionProperty(ElementProperty):
         return QuaternionProperty(element.tag, Quaternion((float(element.get("w")), float(element.get("x")), float(element.get("y")), float(element.get("z")))))
 
     def to_xml(self):
-        x = str(float32(self.value.x))
-        y = str(float32(self.value.y))
-        z = str(float32(self.value.z))
-        w = str(float32(self.value.w))
+        x = _format_float32(self.value.x)
+        y = _format_float32(self.value.y)
+        z = _format_float32(self.value.z)
+        w = _format_float32(self.value.w)
         return ET.Element(self.tag_name, attrib={"x": x, "y": y, "z": z, "w": w})
 
 
