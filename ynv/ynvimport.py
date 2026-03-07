@@ -5,8 +5,8 @@ from bpy.types import (
     Mesh
 )
 import bpy
-import bmesh
 import numpy as np
+from mathutils import Vector
 from .navmesh import navmesh_compute_cell, navmesh_grid_get_cell_filename, navmesh_is_map
 from .navmesh_material import get_navmesh_material
 from .navmesh_attributes import NavMeshAttr, mesh_add_navmesh_attribute
@@ -152,7 +152,7 @@ def get_material(flags_str, material_cache, water_depth):
     return mat
 
 
-def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> Mesh:
+def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> tuple[Mesh, dict]:
     material_cache = {}
     mats = []
     vertices = []
@@ -162,31 +162,67 @@ def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> Mesh:
     audio_data_attrs = [NavMeshAttr.AUDIO_DATA]
     edge_data_attrs = (NavMeshAttr.EDGE_AREA_ID, NavMeshAttr.EDGE_POLY_ID, NavMeshAttr.EDGE_SPACE_AROUND_VERTEX, NavMeshAttr.EDGE_FLAGS)
 
-    pending_poly_flags = [] # Per poly (f1..f4)
-    pending_audio = [] # Per poly
     pending_edges = [] # Per loop: (area, polyid, space, flags)
-    
+    pending_edge_counts = [] # Number of edges per polygon for loop reconstruction
+    poly_links = {} # poly_idx -> "link_id1 link_id2 ..."
+
+    # No vertex deduplication: each polygon gets its own unique vertices.
+    # This prevents from_pydata from dropping faces that share all their
+    # vertex indices with another polygon (non-manifold rejection).
+
+    def is_collinear(verts):
+        """Check if all vertices are collinear (zero-area polygon)."""
+        if len(verts) < 3:
+            return True
+        v0 = verts[0]
+        for i in range(1, len(verts)):
+            for j in range(i + 1, len(verts)):
+                dx1 = verts[i].x - v0.x
+                dy1 = verts[i].y - v0.y
+                dz1 = verts[i].z - v0.z
+                dx2 = verts[j].x - v0.x
+                dy2 = verts[j].y - v0.y
+                dz2 = verts[j].z - v0.z
+                cx = dy1 * dz2 - dz1 * dy2
+                cy = dz1 * dx2 - dx1 * dz2
+                cz = dx1 * dy2 - dy1 * dx2
+                if abs(cx) > 1e-7 or abs(cy) > 1e-7 or abs(cz) > 1e-7:
+                    return False
+        return True
+
     # Build verts/faces + collect attributes in the same order
-    for poly in polygons:
+    for poly_idx, poly in enumerate(polygons):
         mats.append(get_material(poly.flags, material_cache, poly.water_depth))
 
-        # Face indices into vertices
-        face_indices = []
-        for vert in poly.vertices:
-            vert.freeze()
-            face_indices.append(len(vertices))
-            vertices.append(vert)
+        # Collect per-polygon Links
+        if hasattr(poly, 'links') and poly.links and str(poly.links).strip():
+            poly_links[poly_idx] = str(poly.links).strip()
 
-        flags_mask = parse_navpoly_flags(poly.flags)
+        # Each polygon gets its own unique vertex indices
+        face_indices = []
+        poly_verts = list(poly.vertices)
+        for vert in poly_verts:
+            vert.freeze()
+            idx = len(vertices)
+            vertices.append(vert)
+            face_indices.append(idx)
+
+        # Handle 2-vertex polygons (stitch polys) and collinear polygons:
+        # Blender's from_pydata silently drops faces with < 3 vertices or
+        # collinear vertices. Add a tiny z-offset vertex to make them valid.
         if len(face_indices) == 2:
-            assert (flags_mask & Navmesh.polygon_flags["ZeroAreaStitchPolyDLC"]) != 0, \
-                "Polygon with 2 vertices that is not a DLC stitch poly"     
-            face_indices.append(face_indices[-1])
+            v_last = poly_verts[-1]
+            offset_vert = Vector((v_last.x, v_last.y, v_last.z + 1e-7))
+            offset_vert.freeze()
+            offset_idx = len(vertices)
+            vertices.append(offset_vert)
+            face_indices.append(offset_idx)
+        elif len(face_indices) >= 3 and is_collinear(poly_verts):
+            # Collinear polygon — offset the last vertex slightly in z
+            v_last = poly_verts[-1]
+            vertices[face_indices[-1]] = Vector((v_last.x, v_last.y, v_last.z + 1e-7))
 
         faces.append(face_indices)
-        f1,f2,f3,f4 = parse_navpoly_flags_tuple(poly.flags)
-        pending_poly_flags.append((f1,f2,f3,f4))
-        pending_audio.append(poly.audio_data)
 
         if isinstance(poly.edges, str):
             items = []
@@ -205,35 +241,48 @@ def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> Mesh:
         if len(edge_items) != len(face_indices):
             edge_items = (edge_items + [(65535, 32767, 0, 0)] * len(face_indices))[:len(face_indices)]
         pending_edges.extend(edge_items)
+        pending_edge_counts.append(len(face_indices))
 
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(vertices, [], faces)
 
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
-    bm.to_mesh(mesh)
-    bm.free()
-
+    # Verify polygon count matches (no faces dropped by from_pydata)
     poly_count = len(mesh.polygons)
     loop_count = len(mesh.loops)
 
+    if poly_count != len(polygons):
+        print(f"WARNING: Blender mesh has {poly_count} polygons but expected {len(polygons)}. "
+              f"Some faces may have been dropped by from_pydata.")
+
+    # Build attribute arrays — use min(poly_count, len(polygons)) for safety
+    n_polys = min(poly_count, len(polygons))
+
     poly_flags_array = np.zeros((poly_count, len(poly_data_attrs)), dtype=np.float64)
     audio_array = np.zeros(poly_count, dtype=np.uint32)
+    water_depth_array = np.zeros(poly_count, dtype=np.int32)
+    unk30a_array = np.zeros(poly_count, dtype=np.int32)
+    centroid_x_array = np.zeros(poly_count, dtype=np.int32)
+    centroid_y_array = np.zeros(poly_count, dtype=np.int32)
     edge_arrays = np.zeros((loop_count, len(edge_data_attrs)), dtype=np.uint32)
 
-    for poly_idx, poly in enumerate(mesh.polygons):
-        if poly_idx < len(polygons):
-            nav_poly = polygons[poly_idx]
+    for poly_idx in range(n_polys):
+        nav_poly = polygons[poly_idx]
+        mesh_poly = mesh.polygons[poly_idx]
 
-            f1,f2,f3,f4 = parse_navpoly_flags_tuple(nav_poly.flags)
-            poly_flags_array[poly_idx, :] = (f1,f2,f3,f4)
-            audio_array[poly_idx] = nav_poly.audio_data
+        f1,f2,f3,f4 = parse_navpoly_flags_tuple(nav_poly.flags)
+        poly_flags_array[poly_idx, :] = (f1,f2,f3,f4)
+        audio_array[poly_idx] = nav_poly.audio_data
+        water_depth_array[poly_idx] = nav_poly.water_depth if nav_poly.water_depth else 0
+        unk30a_array[poly_idx] = nav_poly.unk30a if nav_poly.unk30a else 0
+        centroid_x_array[poly_idx] = nav_poly.centroid_x if nav_poly.centroid_x else 0
+        centroid_y_array[poly_idx] = nav_poly.centroid_y if nav_poly.centroid_y else 0
 
-            src_edges = nav_poly.edges or []
-            for li, loop_index in enumerate(poly.loop_indices):
-                if li < len(src_edges):
-                    edge_arrays[loop_index, :] = src_edges[li]
+        # Reconstruct edge data per loop
+        edge_offset = sum(pending_edge_counts[:poly_idx])
+        for li, loop_index in enumerate(mesh_poly.loop_indices):
+            edge_src_idx = edge_offset + li
+            if edge_src_idx < len(pending_edges):
+                edge_arrays[loop_index, :] = pending_edges[edge_src_idx]
 
     # Poly attributes
     for i, attr_name in enumerate(poly_data_attrs):
@@ -242,6 +291,18 @@ def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> Mesh:
 
     attr = mesh.attributes.get(NavMeshAttr.AUDIO_DATA) or mesh.attributes.new(NavMeshAttr.AUDIO_DATA, 'INT', 'FACE')
     attr.data.foreach_set("value", audio_array.ravel())
+
+    attr = mesh.attributes.get(NavMeshAttr.WATER_DEPTH) or mesh.attributes.new(NavMeshAttr.WATER_DEPTH, 'INT', 'FACE')
+    attr.data.foreach_set("value", water_depth_array.ravel())
+
+    attr = mesh.attributes.get(NavMeshAttr.UNK30A) or mesh.attributes.new(NavMeshAttr.UNK30A, 'INT', 'FACE')
+    attr.data.foreach_set("value", unk30a_array.ravel())
+
+    attr = mesh.attributes.get(NavMeshAttr.CENTROID_X) or mesh.attributes.new(NavMeshAttr.CENTROID_X, 'INT', 'FACE')
+    attr.data.foreach_set("value", centroid_x_array.ravel())
+
+    attr = mesh.attributes.get(NavMeshAttr.CENTROID_Y) or mesh.attributes.new(NavMeshAttr.CENTROID_Y, 'INT', 'FACE')
+    attr.data.foreach_set("value", centroid_y_array.ravel())
 
     # Edge attributes
     for i, attr_name in enumerate(edge_data_attrs):
@@ -255,16 +316,17 @@ def polygons_to_mesh(name: str, polygons: Sequence[NavPolygon]) -> Mesh:
             used_materials.append(mat)
 
     for idx, poly in enumerate(mesh.polygons):
-        poly.material_index = used_materials.index(mats[idx])
+        if idx < len(mats):
+            poly.material_index = used_materials.index(mats[idx])
 
-    return mesh
+    return mesh, poly_links
 
 
 def navmesh_to_obj(navmesh, filepath):
     name = os.path.basename(filepath.replace(YNV.file_extension, ""))
     
     # Create main mesh object
-    mesh = polygons_to_mesh(name, navmesh.polygons)
+    mesh, poly_links = polygons_to_mesh(name, navmesh.polygons)
     mesh_obj = bpy.data.objects.new(name, mesh)
     mesh_obj.sollum_type = SollumType.NAVMESH
     mesh_obj.empty_display_size = 0
@@ -273,6 +335,10 @@ def navmesh_to_obj(navmesh, filepath):
     # Store data
     mesh_obj["adj_area_ids"] = [int(x) for x in navmesh.adj_area_ids.split()]
     mesh_obj["build_id"] = navmesh.build_id
+
+    # Store per-polygon link indices (dict: poly_idx -> "link_id1 link_id2 ...")
+    if poly_links:
+        mesh_obj["poly_links"] = {str(k): v for k, v in poly_links.items()}
 
     # Create links/portals object
     npobj = links_to_obj(navmesh.links)

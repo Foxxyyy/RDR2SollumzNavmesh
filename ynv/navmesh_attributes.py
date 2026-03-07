@@ -21,13 +21,17 @@ class NavMeshAttr(str, Enum):
 
     AUDIO_DATA = ".navmesh.audio_data"
     BUILD_ID = ".navmesh.audio_data"
+    WATER_DEPTH = ".navmesh.water_depth"
+    UNK30A = ".navmesh.unk30a"
+    CENTROID_X = ".navmesh.centroid_x"
+    CENTROID_Y = ".navmesh.centroid_y"
 
     @property
     def type(self):
         match self:
             case NavMeshAttr.POLY_DATA_0 | NavMeshAttr.POLY_DATA_1 | NavMeshAttr.POLY_DATA_2 | NavMeshAttr.POLY_DATA_3:
                 return "FLOAT"
-            case NavMeshAttr.EDGE_AREA_ID | NavMeshAttr.EDGE_POLY_ID | NavMeshAttr.EDGE_SPACE_AROUND_VERTEX| NavMeshAttr.EDGE_FLAGS | NavMeshAttr.AUDIO_DATA | NavMeshAttr.BUILD_ID:
+            case NavMeshAttr.EDGE_AREA_ID | NavMeshAttr.EDGE_POLY_ID | NavMeshAttr.EDGE_SPACE_AROUND_VERTEX| NavMeshAttr.EDGE_FLAGS | NavMeshAttr.AUDIO_DATA | NavMeshAttr.BUILD_ID | NavMeshAttr.WATER_DEPTH | NavMeshAttr.UNK30A | NavMeshAttr.CENTROID_X | NavMeshAttr.CENTROID_Y:
                 return "INT"
             case _:
                 assert False, f"Type not set for navmesh attribute '{self}'"
@@ -35,7 +39,7 @@ class NavMeshAttr(str, Enum):
     @property
     def domain(self):
         match self:
-            case NavMeshAttr.POLY_DATA_0 | NavMeshAttr.POLY_DATA_1 | NavMeshAttr.POLY_DATA_2 | NavMeshAttr.POLY_DATA_3 | NavMeshAttr.AUDIO_DATA:
+            case NavMeshAttr.POLY_DATA_0 | NavMeshAttr.POLY_DATA_1 | NavMeshAttr.POLY_DATA_2 | NavMeshAttr.POLY_DATA_3 | NavMeshAttr.AUDIO_DATA | NavMeshAttr.WATER_DEPTH | NavMeshAttr.UNK30A | NavMeshAttr.CENTROID_X | NavMeshAttr.CENTROID_Y:
                 return "FACE"
             case NavMeshAttr.EDGE_AREA_ID | NavMeshAttr.EDGE_POLY_ID | NavMeshAttr.EDGE_SPACE_AROUND_VERTEX | NavMeshAttr.EDGE_FLAGS:
                 return "CORNER"

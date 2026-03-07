@@ -78,7 +78,13 @@ def navmesh_from_object(navmesh_obj: Object) -> Optional[Navmesh]:
         navmesh_xml.area_id = navmesh_grid_get_cell_index(cell_x, cell_y)
 
     navmesh_xml.polygons, has_water, is_dlc = polygons_from_object(navmesh_obj)
-    navmesh_xml.adj_area_ids = " ".join(map(str, get_adj_area_ids(navmesh_obj)))
+
+    # Use stored adj_area_ids to preserve original order; fall back to computed
+    stored_adj = navmesh_obj.get("adj_area_ids", None)
+    if stored_adj is not None and len(stored_adj) > 0:
+        navmesh_xml.adj_area_ids = " ".join(map(str, stored_adj))
+    else:
+        navmesh_xml.adj_area_ids = " ".join(map(str, get_adj_area_ids(navmesh_obj)))
     navmesh_xml.build_id = navmesh_obj.get("build_id", 0)
 
     links_obj = next((c for c in navmesh_obj.children if c.sollum_type == SollumType.NAVMESH_LINK_GROUP), None)
@@ -402,9 +408,23 @@ def polygons_from_object(navmesh_obj: Object) -> tuple[list[NavPolygon], bool]:
     edge_flags = mesh.attributes[NavMeshAttr.EDGE_FLAGS].data
     audio_data = mesh.attributes[NavMeshAttr.AUDIO_DATA].data
 
+    water_depth_attr = mesh.attributes.get(NavMeshAttr.WATER_DEPTH, None)
+    water_depth_data = water_depth_attr.data if water_depth_attr else None
+    unk30a_attr = mesh.attributes.get(NavMeshAttr.UNK30A, None)
+    unk30a_data = unk30a_attr.data if unk30a_attr else None
+    centroid_x_attr = mesh.attributes.get(NavMeshAttr.CENTROID_X, None)
+    centroid_x_data = centroid_x_attr.data if centroid_x_attr else None
+    centroid_y_attr = mesh.attributes.get(NavMeshAttr.CENTROID_Y, None)
+    centroid_y_data = centroid_y_attr.data if centroid_y_attr else None
+
+    # Per-polygon special link indices (stored as custom property)
+    stored_poly_links = navmesh_obj.get("poly_links", None)
+    if stored_poly_links is not None:
+        stored_poly_links = dict(stored_poly_links)
+
     compute_edges = bpy.context.window_manager.sz_ui_nav_compute_edge_neighbors
     first_adj_area_id_ref = [0]
-    poly_bbox_resolution = 0.25
+    poly_bbox_resolution = 0.5
 
     # Precompute neighbors (per poly edge loop)
     edge_neighbors = build_edge_neighbors(mesh)
@@ -417,36 +437,65 @@ def polygons_from_object(navmesh_obj: Object) -> tuple[list[NavPolygon], bool]:
 
     def is_valid_poly(verts, eps=1e-5):
         unique = { (round(v.x,4), round(v.y,4), round(v.z,4)) for v in verts }
-        if len(unique) < 3:
+        if len(unique) < 2:
             return False
-        u = list(unique)
-        normal = (Vector(u[1]) - Vector(u[0])).cross(Vector(u[2]) - Vector(u[0]))
-        return normal.length > eps
+        # Accept polygons with 2+ unique vertices (includes collinear/zero-area polys
+        # and stitch polys). The game supports zero-area polygons for doors, stitches, etc.
+        return True
+
+    def is_stitch_poly(flag0, flag1):
+        """Check if polygon is a ZeroAreaStitchPolyDLC (flag1 bit 0x80)"""
+        return bool(int(flag1) & 0x80)
 
     for idx, poly in enumerate(mesh.polygons):
         poly_verts = [navmesh_obj.matrix_world @ mesh.vertices[v].co for v in poly.vertices]
 
-        # Skip degenerate polys
+        # Get poly flags early so we can detect stitch polys
+        flag0 = int(poly_data0[poly.index].value)
+        flag1 = int(poly_data1[poly.index].value)
+        flag2 = int(poly_data2[poly.index].value)
+        flag3 = int(poly_data3[poly.index].value)
+        audio = int(audio_data[poly.index].value)
+        is_stitch = is_stitch_poly(flag0, flag1)
+
+        # Skip degenerate polys (but not stitch polys)
         if not is_valid_poly(poly_verts):
             continue
+
+        # For stitch polys, deduplicate vertices back to 2 unique verts
+        if is_stitch:
+            seen = []
+            unique_verts = []
+            for v in poly_verts:
+                key = (round(v.x, 4), round(v.y, 4), round(v.z, 4))
+                if key not in seen:
+                    seen.append(key)
+                    unique_verts.append(v)
+            poly_verts = unique_verts
         
-        # Centroid + compressed bbox coords
-        centroid = sum(poly_verts, Vector()) / len(poly_verts)
-        poly_min = get_min_vector_list(poly_verts)
-        poly_max = get_max_vector_list(poly_verts)
+        # Centroid: use stored values if available, otherwise recompute
+        stored_cx = int(centroid_x_data[poly.index].value) if centroid_x_data else 0
+        stored_cy = int(centroid_y_data[poly.index].value) if centroid_y_data else 0
+        if stored_cx > 0 or stored_cy > 0:
+            compressed_centroid_x = stored_cx
+            compressed_centroid_y = stored_cy
+        else:
+            centroid = sum(poly_verts, Vector()) / len(poly_verts)
+            poly_min = get_min_vector_list(poly_verts)
+            poly_max = get_max_vector_list(poly_verts)
 
-        poly_min_q = Vector((math.floor(poly_min.x / poly_bbox_resolution) * poly_bbox_resolution,
-                            math.floor(poly_min.y / poly_bbox_resolution) * poly_bbox_resolution,
-                            math.floor(poly_min.z / poly_bbox_resolution) * poly_bbox_resolution))
-        poly_max_q = Vector((math.ceil(poly_max.x / poly_bbox_resolution) * poly_bbox_resolution,
-                            math.ceil(poly_max.y / poly_bbox_resolution) * poly_bbox_resolution,
-                            math.ceil(poly_max.z / poly_bbox_resolution) * poly_bbox_resolution))
+            poly_min_q = Vector((math.floor(poly_min.x / poly_bbox_resolution) * poly_bbox_resolution,
+                                math.floor(poly_min.y / poly_bbox_resolution) * poly_bbox_resolution,
+                                math.floor(poly_min.z / poly_bbox_resolution) * poly_bbox_resolution))
+            poly_max_q = Vector((math.ceil(poly_max.x / poly_bbox_resolution) * poly_bbox_resolution,
+                                math.ceil(poly_max.y / poly_bbox_resolution) * poly_bbox_resolution,
+                                math.ceil(poly_max.z / poly_bbox_resolution) * poly_bbox_resolution))
 
-        poly_size_q = poly_max_q - poly_min_q
-        rel_x = (centroid.x - poly_min_q.x) / poly_size_q.x if poly_size_q.x != 0 else 0.0
-        rel_y = (centroid.y - poly_min_q.y) / poly_size_q.y if poly_size_q.y != 0 else 0.0
-        compressed_centroid_x = min(max(int(rel_x * 256.0), 0), 255)
-        compressed_centroid_y = min(max(int(rel_y * 256.0), 0), 255)
+            poly_size_q = poly_max_q - poly_min_q
+            rel_x = (centroid.x - poly_min_q.x) / poly_size_q.x if poly_size_q.x != 0 else 0.0
+            rel_y = (centroid.y - poly_min_q.y) / poly_size_q.y if poly_size_q.y != 0 else 0.0
+            compressed_centroid_x = min(max(int(rel_x * 256.0), 0), 255)
+            compressed_centroid_y = min(max(int(rel_y * 256.0), 0), 255)
 
         # Edge flags
         edge_flags_struct = compute_edge_flags_struct(
@@ -464,24 +513,44 @@ def polygons_from_object(navmesh_obj: Object) -> tuple[list[NavPolygon], bool]:
             compute_edges
         )
 
-        # Poly flags & audio
-        flag0 = int(poly_data0[poly.index].value)
-        flag1 = int(poly_data1[poly.index].value)
-        flag2 = int(poly_data2[poly.index].value)
-        flag3 = int(poly_data3[poly.index].value)
-        audio = int(audio_data[poly.index].value)
+        # For stitch polygons, trim edge data to match the 2 unique vertices
+        if is_stitch and len(edge_flags_struct) > len(poly_verts):
+            edge_flags_struct = edge_flags_struct[:len(poly_verts)]
 
         if int(flag1) & 0x80:
             is_dlc = True
 
+        # Detect water flag (flag0 bit 0x80 = Water)
+        if int(flag0) & 0x80:
+            has_water = True
+
+        # Read WaterDepth from stored attribute
+        water_depth = 0
+        if water_depth_data is not None:
+            water_depth = int(water_depth_data[poly.index].value)
+
+        # Read Unk30a from stored attribute
+        unk30a = 0
+        if unk30a_data is not None:
+            unk30a = int(unk30a_data[poly.index].value)
+
         # Build NavPolygon
         poly_xml = NavPolygon()
         poly_xml.vertices = poly_verts
-        poly_xml.audio_data = audio
+        poly_xml.audio_data = audio if audio != 0 else 0
+        poly_xml.water_depth = water_depth if water_depth != 0 else 0
+        poly_xml.unk30a = unk30a if unk30a != 0 else 0
         poly_xml.centroid_x = compressed_centroid_x
         poly_xml.centroid_y = compressed_centroid_y
         poly_xml.edges = "\n".join(f"{e[0]}; {e[1]}; {e[2]}; {e[3]}" for e in edge_flags_struct)
-        poly_xml.flags = Navmesh.flags_to_names(flag0, flag1, flag2, flag3)  
+        poly_xml.flags = Navmesh.flags_to_names(flag0, flag1, flag2, flag3)
+
+        # Per-polygon special link indices
+        if stored_poly_links is not None:
+            link_str = stored_poly_links.get(str(idx), None)
+            if link_str:
+                poly_xml.links = link_str
+
         polygons_xml.append(poly_xml)
         
     navmesh_obj_eval.to_mesh_clear()
